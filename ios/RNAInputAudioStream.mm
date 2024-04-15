@@ -69,16 +69,30 @@ void HandleInputBuffer(void *inUserData,
   self->onError = onError;
   
   // Configuration and activation of audio session.
-  /*
+
   NSError *error;
   AVAudioSession *audioSession = [AVAudioSession sharedInstance];
-  [audioSession setCategory:AVAudioSessionCategoryRecord error:&error];
-  [self handleError:error];
-  [audioSession setMode:AVAudioSessionModeMeasurement error:&error];
-  [self handleError:error];
+
+  // Set the audio session category for recording with echo cancellation
+  [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord error:&error];
+  if (error) {
+    [self handleError:error];
+    return nil; // Early exit if audio session setup fails
+}
+
+  // Set mode to VoiceChat to enable built-in echo cancellation
+  [audioSession setMode:AVAudioSessionModeVoiceChat error:&error];
+  if (error) {
+    [self handleError:error];
+    return nil; // Early exit if audio session setup fails
+}
+
+  // Activate the audio session
   [audioSession setActive:YES error:&error];
-  [self handleError:error];
-   */
+  if (error) {
+    [self handleError:error];
+    return nil; // Early exit if audio session setup fails
+}
   
   // Creates stream configuration.
   AudioStreamBasicDescription config = {0};
