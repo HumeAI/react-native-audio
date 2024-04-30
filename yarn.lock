@@ -1703,33 +1703,6 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"@dr.pogodin/react-native-audio@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "@dr.pogodin/react-native-audio@workspace:."
-  dependencies:
-    "@dr.pogodin/js-utils": ^0.0.6
-    "@react-native/eslint-config": ^0.74.0
-    "@types/jest": ^29.5.5
-    "@types/react": ^18.2.23
-    del-cli: ^5.1.0
-    eslint: ^8.50.0
-    eslint-config-prettier: ^9.0.0
-    eslint-plugin-prettier: ^5.0.0
-    jest: ^29.7.0
-    pod-install: ^0.1.39
-    prettier: ^3.0.3
-    react: 18.2.0
-    react-native: 0.73.0
-    react-native-builder-bob: ^0.23.2
-    react-native-permissions: ^4.0.1
-    typescript: ^5.2.2
-  peerDependencies:
-    react: ^18
-    react-native: ^0.73
-    react-native-permissions: ">=3.8"
-  languageName: unknown
-  linkType: soft
-
 "@dr.pogodin/react-native-fs@npm:^2.22.0-alpha.1":
   version: 2.22.0-alpha.1
   resolution: "@dr.pogodin/react-native-fs@npm:2.22.0-alpha.1"
@@ -1825,6 +1798,33 @@ __metadata:
   checksum: 24929487b1ed48795d2f08346a0116cc5ee4634848bce64161fb947109352c562310fd159fc64dda0e8b853307f5794605191a9547f7341158559ca3c8262a45
   languageName: node
   linkType: hard
+
+"@humeai/react-native-audio@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "@humeai/react-native-audio@workspace:."
+  dependencies:
+    "@dr.pogodin/js-utils": ^0.0.6
+    "@react-native/eslint-config": ^0.74.0
+    "@types/jest": ^29.5.5
+    "@types/react": ^18.2.23
+    del-cli: ^5.1.0
+    eslint: ^8.50.0
+    eslint-config-prettier: ^9.0.0
+    eslint-plugin-prettier: ^5.0.0
+    jest: ^29.7.0
+    pod-install: ^0.1.39
+    prettier: ^3.0.3
+    react: 18.2.0
+    react-native: 0.73.0
+    react-native-builder-bob: ^0.23.2
+    react-native-permissions: ^4.0.1
+    typescript: ^5.2.2
+  peerDependencies:
+    react: ^18
+    react-native: ^0.73
+    react-native-permissions: ">=3.8"
+  languageName: unknown
+  linkType: soft
 
 "@isaacs/cliui@npm:^8.0.2":
   version: 8.0.2
