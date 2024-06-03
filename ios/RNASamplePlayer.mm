@@ -18,7 +18,8 @@
 @implementation RNAOutputStream {
   AVAudioPlayerNode *player;
   NSTimer *timer;
-    NSMutableData *playbackBuffer;
+  RCTPromiseResolveBlock resolveBlock;
+  RCTPromiseRejectBlock rejectBlock;
 }
 
 - (id) init:(AVAudioEngine*)engine
@@ -35,9 +36,13 @@
                  options:loop ? AVAudioPlayerNodeBufferLoops : 0
   completionCallbackType:AVAudioPlayerNodeCompletionDataPlayedBack
        completionHandler:^(AVAudioPlayerNodeCompletionCallbackType) {
-    // NOTE: Node detachment should be done async, otherwise it just hangs,
-    // presumably because the engine waits till completion handler exists
-    // before it assumes the node can be detached.
+      if (self->resolveBlock) {
+        self->resolveBlock(nil);
+        self->resolveBlock = nil;
+      }
+      // NOTE: Node detachment should be done async, otherwise it just hangs,
+      // presumably because the engine waits till completion handler exists
+      // before it assumes the node can be detached.
     dispatch_async(dispatch_get_main_queue(), ^(void) {
       [engine detachNode:self->player];
     });
@@ -51,10 +56,15 @@
 {
   NSError *error;
   AVAudioEngine *engine = player.engine;
+    
+  self->resolveBlock = resolve;
+  self->rejectBlock = reject;
+    
   if (engine.running != YES && [engine startAndReturnError:&error] != YES) {
     [[RNAudioException fromError:error] reject:reject];
     return;
   }
+    
   [player play];
     
   AVAudioSession *session = [AVAudioSession sharedInstance];
@@ -71,12 +81,15 @@
       return;
   }
     
-  resolve(nil);
 }
 
 - (void) stop
 {
     [player stop];
+    if (self->resolveBlock) {
+        self->resolveBlock(nil);
+        self->resolveBlock = nil;
+    }
     return;
 }
 
