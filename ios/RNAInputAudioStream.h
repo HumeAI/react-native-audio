@@ -3,7 +3,6 @@
 #import "RNAudioException.h"
 
 enum AUDIO_FORMATS {
-  PCM_8BIT = 1,
   PCM_16BIT = 2,
   PCM_FLOAT = 3
 };

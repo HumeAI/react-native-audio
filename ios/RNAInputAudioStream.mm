@@ -3,57 +3,12 @@
 #import <AVFoundation/AVFoundation.h>
 #import <React/RCTLog.h>
 
-const int NUM_BUFFERS = 3;
-
 @implementation RNAInputAudioStream {
   BOOL destroyed;
   int chunkId;
-  AudioQueueBufferRef buffers[NUM_BUFFERS];
-  AudioQueueRef queue;
   OnChunk onChunk;
   OnError onError;
-}
-
-void HandleInputBuffer(void *inUserData,
-                       AudioQueueRef inAQ,
-                       AudioQueueBufferRef inBuffer,
-                       const AudioTimeStamp *inStartTime,
-                       UInt32 inNumPackets,
-                       const AudioStreamPacketDescription *inPacketDesc)
-{
-  RNAInputAudioStream *stream = (__bridge RNAInputAudioStream*)inUserData;
-  if (!stream.muted) {
-    stream->onChunk(stream->chunkId,
-                    (unsigned char *)inBuffer->mAudioData,
-                    inBuffer->mAudioDataByteSize);
-  }
-  ++stream->chunkId;
-  [stream handleStatus:AudioQueueEnqueueBuffer(inAQ, inBuffer, 0, NULL)];
-}
-
-/**
- *  Handles given error. If the error is not nil, it triggers onError callback with a message string composed
- *  for the error object; otherwise it does nothing.
- *  @param error  Error object.
- */
-- (void)handleError:(NSError*)error
-{
-  if (error) {
-    onError([NSString stringWithFormat:@"%@ [%d]: %@",
-             error.domain, (int)error.code, error.localizedDescription]);
-  }
-}
-
-/**
- * Handles given status. If it is correspond to an error, it calls onError callback with a message string
- * composed for that status; otherwise it does nothing.
- * @param status Operaiton result status.
- */
-- (void)handleStatus:(OSStatus)status
-{
-  if (status) {
-    onError([NSString stringWithFormat:@"Error: %d", (int)status]);
-  }
+  AVAudioEngine *audioEngine;
 }
 
 - (id)initWithAudioSource:(enum AUDIO_SOURCES)audioSource
@@ -65,89 +20,115 @@ void HandleInputBuffer(void *inUserData,
                   onError:(OnError)onError
 {
   self = [super init];
-  self->onChunk = onChunk;
-  self->onError = onError;
-  
-  // Configuration and activation of audio session.
+    if (self) {
+        
+        self->onChunk = onChunk;
+        self->onError = onError;
+        
 
-  NSError *error;
-  AVAudioSession *audioSession = [AVAudioSession sharedInstance];
+      audioEngine = [[AVAudioEngine alloc] init];
+      AVAudioInputNode *inputNode = [audioEngine inputNode];
+    
+        
+        NSError *error = nil;
+        
+        if (@available(iOS 13.0, *)) { // Not sure if there's a better place for this, but it silences the warning in Xcode as is.
+            [inputNode setVoiceProcessingEnabled:YES error:&error];
+        } else {
+            onError(@"Unsupported iOS version! You must be on version >= 13.0");
+            return nil;
+        }
+        
+        AVAudioFormat *inputNodeFormat = [inputNode outputFormatForBus:0];
+        NSLog(@"Native input audio format: %@", inputNodeFormat);
+        
+        AVAudioCommonFormat commonFormat;
+        if (audioFormat == PCM_16BIT) {
+            commonFormat = AVAudioPCMFormatInt16;
+        } else {
+            // PCM_FLOAT
+            commonFormat = AVAudioPCMFormatFloat32;
+        }
+        
+        
+      AVAudioFormat *desiredFormat = [[AVAudioFormat alloc] initWithCommonFormat:commonFormat
+                                                               sampleRate:sampleRate
+                                                                 channels:(channelConfig == MONO ? 1 : 2)
+                                                              interleaved:NO];
+       NSLog(@"Desired input audio format: %@", desiredFormat);
+        
+        // This converter could be further configured, but the default settings are quite good imo
+        AVAudioConverter *audioConverter = [[AVAudioConverter alloc] initFromFormat:inputNodeFormat toFormat:desiredFormat];
+        if (audioConverter == nil) {
+            onError(@"Conversion to desired format is not possible! Please ensure your stream settings and device capabilities are aligned.");
+            return nil;
+        }
+        
 
-  // Set the audio session category for recording with echo cancellation
-  [audioSession setCategory:AVAudioSessionCategoryPlayAndRecord error:&error];
-  if (error) {
-    [self handleError:error];
-    return nil; // Early exit if audio session setup fails
-}
+        float sampleRateCoefficient = inputNodeFormat.sampleRate / desiredFormat.sampleRate;
+        
+        // A desired frame of size @samplingSize at sample rate @sampleRate can be obtained as below.
+        // We have limited influence over the input format from the hardware, so we will defer our conversions to the AVAudioConverter
+        UInt32 convertedBufferSize = UInt32(samplingSize * sampleRateCoefficient);
+        
+        [inputNode installTapOnBus:0 bufferSize:convertedBufferSize format:inputNodeFormat block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+            
+            buffer.frameLength = convertedBufferSize; // The bufferSize argument above is usually ignored. Setting the frameLength like this forces the correct sizing
+        
+            // Since we are taking the given samplingSize to be in terms of output format, we don't need to adjust frameCapacity on the converted buffer
+            AVAudioPCMBuffer *convertedBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:desiredFormat frameCapacity:(AVAudioFrameCount)samplingSize];
+            
+            AVAudioConverterInputBlock inputBlock = ^AVAudioBuffer * _Nullable(AVAudioPacketCount inNumPackets, AVAudioConverterInputStatus *outStatus) {
+                *outStatus = AVAudioConverterInputStatus_HaveData;
+                return buffer;
+            };
+            
+            NSError *conversionError = nil;
+            AVAudioConverterOutputStatus status = [audioConverter convertToBuffer:convertedBuffer error:&conversionError withInputFromBlock:inputBlock];
+            
+            if (status != AVAudioConverterOutputStatus_HaveData) {
+                onError([NSString stringWithFormat:@"Conversion error: %@", conversionError]);
+                return;
+            }
 
-  // Set mode to VoiceChat to enable built-in echo cancellation
-  [audioSession setMode:AVAudioSessionModeVoiceChat error:&error];
-  if (error) {
-    [self handleError:error];
-    return nil; // Early exit if audio session setup fails
-}
+            const AudioBufferList *bufferList = convertedBuffer.audioBufferList;
 
-  // Activate the audio session
-  [audioSession setActive:YES error:&error];
-  if (error) {
-    [self handleError:error];
-    return nil; // Early exit if audio session setup fails
-}
-  
-  // Creates stream configuration.
-  AudioStreamBasicDescription config = {0};
-  config.mFormatID = kAudioFormatLinearPCM;
-  config.mFormatFlags = 0;
-  switch (audioFormat) {
-    case PCM_8BIT: config.mBitsPerChannel = 8; break;
-    case PCM_16BIT:
-      config.mBitsPerChannel = 16;
-      config.mFormatFlags |= kAudioFormatFlagIsSignedInteger;
-      break;
-    case PCM_FLOAT:
-      config.mBitsPerChannel = 32;
-      config.mFormatFlags |= kAudioFormatFlagIsFloat;
-      break;
-    default: onError(@"Invalid audio format");
-  }
-  switch (channelConfig) {
-    case MONO: config.mChannelsPerFrame = 1; break;
-    case STEREO: config.mChannelsPerFrame = 2; break;
-    default: onError(@"Invalid channel config");
-  }
-  config.mBytesPerFrame = config.mBitsPerChannel * config.mChannelsPerFrame / 8;
-  config.mBytesPerPacket = config.mBytesPerFrame;
-  config.mFramesPerPacket = 1;
-  config.mReserved = 0;
-  config.mSampleRate = sampleRate;
-  
-  int bufferSize = samplingSize * config.mBytesPerFrame;
-  
-  [self handleStatus:AudioQueueNewInput(&config, HandleInputBuffer,
-                                        (__bridge void*)self,
-                                        NULL, NULL, 0, &queue)];
-  for (int i = 0; i < NUM_BUFFERS; ++i) {
-    [self handleStatus:AudioQueueAllocateBuffer(queue, bufferSize, &buffers[i])];
-    [self handleStatus:AudioQueueEnqueueBuffer(queue, buffers[i], 0, NULL)];
-  }
-  [self handleStatus:AudioQueueStart(queue, NULL)];
-  
+            for (NSUInteger i = 0; i < bufferList->mNumberBuffers; i++) {
+                AudioBuffer audioBuffer = bufferList->mBuffers[i];
+                
+                if (!self.muted) {
+                    self->onChunk(self->chunkId, (unsigned char *) audioBuffer.mData,(unsigned int) audioBuffer.mDataByteSize);
+                }
+
+                // Increment chunkId for the next audio chunk.
+                ++self->chunkId;
+            }
+        }];
+        
+
+      [audioEngine prepare];
+      [audioEngine startAndReturnError:&error];
+      if (error) {
+          onError([NSString stringWithFormat:@"AVAudioEngine start error: %@", error]);
+          return nil;
+      }
+        
+    }
+    
   return self;
 }
 
-/**
- * Stops and destroys the stream.
- */
-- (void)stop {
-  if (!destroyed) {
-    destroyed = true;
-    [self handleStatus:AudioQueueDispose(queue, false)];
-  }
+- (void)dealloc {
+    [self stop];
 }
 
-- (void)dealloc {
-  [self stop];
+- (void)stop {
+    if (audioEngine.isRunning) {
+        [audioEngine.inputNode removeTapOnBus:0];
+        [audioEngine stop];
+    }
 }
+
 
 + (RNAInputAudioStream*) streamAudioSource:(enum AUDIO_SOURCES)audioSource
                                 sampleRate:(int)sampleRate

@@ -17,8 +17,8 @@
 
 @implementation RNAOutputStream {
   AVAudioPlayerNode *player;
-  AVAudioMixerNode *mixer;
   NSTimer *timer;
+    NSMutableData *playbackBuffer;
 }
 
 - (id) init:(AVAudioEngine*)engine
@@ -26,11 +26,10 @@
        loop:(BOOL)loop
 {
   player = [[AVAudioPlayerNode alloc] init];
-  mixer = [[AVAudioMixerNode alloc] init];
   [engine attachNode:player];
-  [engine attachNode:mixer];
-  [engine connect:player to:mixer format:sample.format];
-  [engine connect:mixer to:engine.mainMixerNode format:nil];
+    
+  [engine connect:player to:engine.mainMixerNode format:sample.format];
+
   [player scheduleBuffer:sample
                   atTime:nil
                  options:loop ? AVAudioPlayerNodeBufferLoops : 0
@@ -40,25 +39,11 @@
     // presumably because the engine waits till completion handler exists
     // before it assumes the node can be detached.
     dispatch_async(dispatch_get_main_queue(), ^(void) {
-      [engine detachNode:self->mixer];
       [engine detachNode:self->player];
     });
   }];
+    
   return self;
-}
-
-- (void) fadeOut
-{
-  if (mixer.outputVolume <= 0.1) {
-    [player stop];
-    return;
-  }
-
-  mixer.outputVolume -= 0.1;
-  dispatch_time_t when = dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC * 0.01);
-  dispatch_after(when, dispatch_get_main_queue(), ^(void) {
-    [self fadeOut];
-  });
 }
 
 - (void) play:(RCTPromiseResolveBlock)resolve
@@ -71,12 +56,28 @@
     return;
   }
   [player play];
+    
+  AVAudioSession *session = [AVAudioSession sharedInstance];
+  [session overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:&error];
+  [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error];
+  /*
+   The output audio port overrides are needed for playback with echo cancellation to function properly. Apple developer
+   forum post here: https://forums.developer.apple.com/forums/thread/721535
+   No one knows why and Apple doesn't seem to acknowledge that this is an issue.
+   */
+      
+  if (error) {
+      [[RNAudioException fromError:error] reject:reject];
+      return;
+  }
+    
   resolve(nil);
 }
 
 - (void) stop
 {
-  if (mixer.outputVolume == 1.0) [self fadeOut];
+    [player stop];
+    return;
 }
 
 @end // RNAOutputStream
@@ -98,6 +99,8 @@
   samples = [NSMutableDictionary new];
   return self;
 }
+
+
 
 - (void) load:(NSString*)name
      fromPath:(NSString*)path
@@ -175,6 +178,7 @@
   [samples removeObjectForKey:sampleName];
   resolve(nil);
 }
+
 
 /**
  * Creates a new RNASamplePlayer instance.
