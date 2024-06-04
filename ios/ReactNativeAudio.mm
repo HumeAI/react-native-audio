@@ -12,6 +12,7 @@ NSString *EVENT_SAMPLE_PLAYER_ERROR = @"RNA_SamplePlayerError";
 @implementation ReactNativeAudio {
   NSMutableDictionary<NSNumber*,RNAInputAudioStream*> *inputStreams;
   NSMutableDictionary<NSNumber*,RNASamplePlayer*> *samplePlayers;
+  
 }
 
 RCT_EXPORT_MODULE()
@@ -61,6 +62,51 @@ RCT_REMAP_METHOD(getInputAvailable,
     EVENT_INPUT_AUDIO_STREAM_ERROR,
     EVENT_SAMPLE_PLAYER_ERROR
   ];
+}
+
+- (void)registerAVAudioSessionObservers {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+
+    [center addObserver:self selector:@selector(handleRouteChange:) name:AVAudioSessionRouteChangeNotification object:nil];
+}
+
+- (void)unregisterAVAudioSessionObservers {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)handleRouteChange:(NSNotification *)notification {
+    AVAudioSessionRouteChangeReason reason = (AVAudioSessionRouteChangeReason)[notification.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+
+    switch (reason) { 
+        case AVAudioSessionRouteChangeReasonUnknown:
+        case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
+        case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
+        case AVAudioSessionRouteChangeReasonCategoryChange:
+        case AVAudioSessionRouteChangeReasonOverride:
+        case AVAudioSessionRouteChangeReasonWakeFromSleep:
+        case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
+        case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
+            
+            for (id key in samplePlayers) {
+                RNASamplePlayer *player = [samplePlayers objectForKey:key];
+                [player setIsSpeakerOutput:[self isSpeakerOutput]];
+            }
+            
+            break;
+    }
+}
+
+- (BOOL) isSpeakerOutput {
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSArray<AVAudioSessionPortDescription *> *outputs = session.currentRoute.outputs;
+    
+    // currentRoute.outputs is an array but I haven't seen it report more than 1 output in any setup I have tested
+    for (AVAudioSessionPortDescription *output in outputs) {
+        if ([[output.portType lowercaseString] containsString:@"speaker"]) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 // TODO: Should we somehow plug-in this audio system configuration into
@@ -133,6 +179,7 @@ RCT_REMAP_METHOD(listen,
   reject:(RCTPromiseRejectBlock) reject
 ) {
   NSNumber *sid = [NSNumber numberWithDouble:streamId];
+  [self registerAVAudioSessionObservers];
     
   OnChunk onChunk = ^void(int chunkId, unsigned char *chunk, int size) {
     NSData* data = [NSData dataWithBytesNoCopy:chunk
@@ -173,6 +220,7 @@ RCT_REMAP_METHOD(unlisten,
     
       [inputStreams[id] stop];
       [inputStreams removeObjectForKey:id];
+      [self unregisterAVAudioSessionObservers];
       
       RCTLogInfo(@"[Stream %@] Is unlistened", id);
       
@@ -222,7 +270,7 @@ RCT_EXPORT_METHOD(initSamplePlayer:(double)playerId
                        body:@{@"playerId":id, @"error":error}];
   };
 
-  samplePlayers[id] = [RNASamplePlayer new:onError];
+  samplePlayers[id] = [RNASamplePlayer samplePlayerWithError:onError isSpeakerOutput:[self isSpeakerOutput]];
   resolve(nil);
 }
 

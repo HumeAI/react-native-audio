@@ -9,7 +9,8 @@
        loop:(BOOL)loop;
 
 - (void) play:(RCTPromiseResolveBlock)resolve
-       reject:(RCTPromiseRejectBlock)reject;
+       reject:(RCTPromiseRejectBlock)reject
+       isSpeakerOutput:(BOOL)isSpeakerOutput;
 
 - (void) stop;
 
@@ -53,6 +54,7 @@
 
 - (void) play:(RCTPromiseResolveBlock)resolve
        reject:(RCTPromiseRejectBlock)reject
+       isSpeakerOutput:(BOOL)isSpeakerOutput
 {
   NSError *error;
   AVAudioEngine *engine = player.engine;
@@ -67,19 +69,21 @@
     
   [player play];
     
-  AVAudioSession *session = [AVAudioSession sharedInstance];
-  [session overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:&error];
-  [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error];
-  /*
-   The output audio port overrides are needed for playback with echo cancellation to function properly. Apple developer
-   forum post here: https://forums.developer.apple.com/forums/thread/721535
-   No one knows why and Apple doesn't seem to acknowledge that this is an issue.
-   */
-      
-  if (error) {
-      [[RNAudioException fromError:error] reject:reject];
-      return;
-  }
+    if (isSpeakerOutput) {
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:&error];
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error];
+        /*
+         The output audio port overrides are needed here for playback with echo cancellation to function properly.
+         Apple developer forum post here: https://forums.developer.apple.com/forums/thread/721535
+         No one seems to knows why and Apple doesn't seem to acknowledge that this is an issue.
+         */
+        
+        if (error) {
+            [[RNAudioException fromError:error] reject:reject];
+            return;
+        }
+    }
     
 }
 
@@ -100,14 +104,17 @@
   AVAudioEngine *engine;
   NSMutableDictionary<NSString*,AVAudioPCMBuffer*> *samples;
   RNAOutputStream *activeStream;
+  BOOL isSpeakerOutput;
 }
 
 /**
  * Inits RNASamplePlayer instance.
  */
 - (id) init:(OnError)onError
+       isSpeakerOutput:(BOOL)isSpeakerOutput;
 {
   self->onError = onError;
+  self->isSpeakerOutput = isSpeakerOutput;
   engine = [[AVAudioEngine alloc] init];
   samples = [NSMutableDictionary new];
   return self;
@@ -165,7 +172,7 @@
                   init:engine
                   sample:sample
                   loop:loop];
-  [activeStream play:resolve reject:reject];
+  [activeStream play:resolve reject:reject isSpeakerOutput:self->isSpeakerOutput];
 }
 
 - (void) stop:(NSString*)sampleName
@@ -192,13 +199,31 @@
   resolve(nil);
 }
 
+- (void) setIsSpeakerOutput:(BOOL)isSpeakerOutput
+{
+    if (self->isSpeakerOutput == isSpeakerOutput) return;
+    
+    self->isSpeakerOutput = isSpeakerOutput;
+    
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSError *error;
+    if (isSpeakerOutput) {
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error];
+    } else {
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:&error];
+    }
+    
+    if(error) {
+        self->onError(error.localizedDescription);
+    }
+}
+
 
 /**
  * Creates a new RNASamplePlayer instance.
  */
-+ (RNASamplePlayer*) new:(OnError)onError
-{
-  return [[RNASamplePlayer alloc] init:onError];
++ (RNASamplePlayer *)samplePlayerWithError:(OnError)onError isSpeakerOutput:(BOOL)isSpeakerOutput {
+    return [[RNASamplePlayer alloc] init:onError isSpeakerOutput:isSpeakerOutput];
 }
 
 @end // RNASamplePlayer

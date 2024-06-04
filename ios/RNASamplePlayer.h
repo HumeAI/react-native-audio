@@ -6,7 +6,8 @@
 #import "RNAudioException.h"
 
 @interface RNASamplePlayer: NSObject
-- (id) init:(OnError)onError;
+- (id) init:(OnError)onError
+isSpeakerOutput:(BOOL)isSpeakerOutput;
 
 - (void) load:(NSString*)name
      fromPath:(NSString*)path
@@ -26,7 +27,9 @@
         resolve:(RCTPromiseResolveBlock)resolve
          reject:(RCTPromiseRejectBlock)reject;
 
-+ (RNASamplePlayer*) new:(OnError)onError;
+- (void) setIsSpeakerOutput:(BOOL)isSpeakerOutput;
+
++ (RNASamplePlayer*) samplePlayerWithError:(OnError)onError isSpeakerOutput:(BOOL)isSpeakerOutput;
 @end // RNASamplePlayer
 
 #endif /* RNASamplePlayer_h */
