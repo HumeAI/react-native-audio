@@ -12,6 +12,7 @@ NSString *EVENT_SAMPLE_PLAYER_ERROR = @"RNA_SamplePlayerError";
 @implementation ReactNativeAudio {
   NSMutableDictionary<NSNumber*,RNAInputAudioStream*> *inputStreams;
   NSMutableDictionary<NSNumber*,RNASamplePlayer*> *samplePlayers;
+  
 }
 
 RCT_EXPORT_MODULE()
@@ -24,7 +25,6 @@ RCT_EXPORT_MODULE()
 
 - (NSDictionary *) constantsToExport {
   return @{
-    @"AUDIO_FORMAT_PCM_8BIT": [NSNumber numberWithInt:PCM_8BIT],
     @"AUDIO_FORMAT_PCM_16BIT": [NSNumber numberWithInt:PCM_16BIT],
     @"AUDIO_FORMAT_PCM_FLOAT": [NSNumber numberWithInt:PCM_FLOAT],
     @"AUDIO_SOURCE_DEFAULT": [NSNumber numberWithInt:DEFAULT],
@@ -52,7 +52,7 @@ RCT_REMAP_METHOD(getInputAvailable,
  */
 - (dispatch_queue_t)methodQueue
 {
-  return dispatch_queue_create("studio.pogodin.react_native_audio", DISPATCH_QUEUE_SERIAL);
+  return dispatch_queue_create("hume.ai.react_native_audio", DISPATCH_QUEUE_SERIAL);
 }
 
 - (NSArray<NSString*>*)supportedEvents
@@ -62,6 +62,51 @@ RCT_REMAP_METHOD(getInputAvailable,
     EVENT_INPUT_AUDIO_STREAM_ERROR,
     EVENT_SAMPLE_PLAYER_ERROR
   ];
+}
+
+- (void)registerAVAudioSessionObservers {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+
+    [center addObserver:self selector:@selector(handleRouteChange:) name:AVAudioSessionRouteChangeNotification object:nil];
+}
+
+- (void)unregisterAVAudioSessionObservers {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)handleRouteChange:(NSNotification *)notification {
+    AVAudioSessionRouteChangeReason reason = (AVAudioSessionRouteChangeReason)[notification.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+
+    switch (reason) { 
+        case AVAudioSessionRouteChangeReasonUnknown:
+        case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
+        case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
+        case AVAudioSessionRouteChangeReasonCategoryChange:
+        case AVAudioSessionRouteChangeReasonOverride:
+        case AVAudioSessionRouteChangeReasonWakeFromSleep:
+        case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
+        case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
+            
+            for (id key in samplePlayers) {
+                RNASamplePlayer *player = [samplePlayers objectForKey:key];
+                [player setIsSpeakerOutput:[self isSpeakerOutput]];
+            }
+            
+            break;
+    }
+}
+
+- (BOOL) isSpeakerOutput {
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSArray<AVAudioSessionPortDescription *> *outputs = session.currentRoute.outputs;
+    
+    // currentRoute.outputs is an array but I haven't seen it report more than 1 output in any setup I have tested
+    for (AVAudioSessionPortDescription *output in outputs) {
+        if ([[output.portType lowercaseString] containsString:@"speaker"]) {
+            return YES;
+        }
+    }
+    return NO;
 }
 
 // TODO: Should we somehow plug-in this audio system configuration into
@@ -79,8 +124,6 @@ RCT_REMAP_METHOD(configAudioSystem,
   AVAudioSessionCategory category;
   if ([cats containsObject:AVAudioSessionCategoryPlayAndRecord]) {
     category = AVAudioSessionCategoryPlayAndRecord;
-  } else if ([cats containsObject:AVAudioSessionCategoryPlayback]) {
-    category = AVAudioSessionCategoryPlayback;
   } else {
     reject(@"incompatible_audio_session",
            @"neither play-and-record, nor playback category is supported",
@@ -99,20 +142,14 @@ RCT_REMAP_METHOD(configAudioSystem,
   // option triggers an error if one attempts to set it for a category that does
   // not support audio input. For categories that do support it, it allows for
   // simultaneous playback and audio input.
-  if (category == AVAudioSessionCategoryPlayAndRecord) {
-    if (@available(iOS 14.5, *)) {
-      options |= AVAudioSessionCategoryOptionOverrideMutedMicrophoneInterruption;
-    }
+  if (@available(iOS 14.5, *)) {
+    options |= AVAudioSessionCategoryOptionOverrideMutedMicrophoneInterruption;
   }
 
   BOOL res = [audioSession setCategory:category
                            withOptions:options
                                  error:&error];
 
-  // TODO: Currently here, and in the next rejection, although we include
-  // error object, the details of error we get to sentry are minimal, should
-  // be investigated, and checked how do we pass all available details to
-  // Sentry?
 
   // TODO: Probably, need to provide additional details here. At least
   // add some error ID, to determine where exactly do errors are thrown.
@@ -142,12 +179,13 @@ RCT_REMAP_METHOD(listen,
   reject:(RCTPromiseRejectBlock) reject
 ) {
   NSNumber *sid = [NSNumber numberWithDouble:streamId];
-
+  [self registerAVAudioSessionObservers];
+    
   OnChunk onChunk = ^void(int chunkId, unsigned char *chunk, int size) {
-    RCTLogInfo(@"[Stream %@] Audio data chunk %d received", sid, chunkId);
     NSData* data = [NSData dataWithBytesNoCopy:chunk
                                         length:size
                                   freeWhenDone:NO];
+      
     [self sendEventWithName:EVENT_AUDIO_CHUNK
                        body:@{@"streamId":sid,
                               @"chunkId":@(chunkId),
@@ -178,12 +216,17 @@ RCT_REMAP_METHOD(unlisten,
   resolve:(RCTPromiseResolveBlock) resolve
   reject:(RCTPromiseRejectBlock) reject
 ) {
-  NSNumber *id = [NSNumber numberWithDouble:streamId];
-  [inputStreams[id] stop];
-  [inputStreams removeObjectForKey:id];
-  RCTLogInfo(@"[Stream %@] Is unlistened", id);
-  resolve(nil);
+    NSNumber *id = [NSNumber numberWithDouble:streamId];
+    
+      [inputStreams[id] stop];
+      [inputStreams removeObjectForKey:id];
+      [self unregisterAVAudioSessionObservers];
+      
+      RCTLogInfo(@"[Stream %@] Is unlistened", id);
+      
+      resolve(nil);
 }
+
 
 RCT_REMAP_METHOD(muteInputStream,
   muteInputStream:(double)streamId muted:(BOOL)muted
@@ -210,6 +253,11 @@ RCT_EXPORT_METHOD(initSamplePlayer:(double)playerId
                   reject:(RCTPromiseRejectBlock)reject)
 {
   NSNumber *id = [NSNumber numberWithDouble:playerId];
+    if (samplePlayers.count > 0) { // We only need 1 sample player, and this init block is being called multiple times per session from somewhere upstream.
+        resolve(nil);
+        return;
+    }
+    
   if (samplePlayers[id] != nil) {
     [[RNAudioException INTERNAL_ERROR:0
                               details:@"Sample player ID is occupied"]
@@ -222,7 +270,7 @@ RCT_EXPORT_METHOD(initSamplePlayer:(double)playerId
                        body:@{@"playerId":id, @"error":error}];
   };
 
-  samplePlayers[id] = [RNASamplePlayer new:onError];
+  samplePlayers[id] = [RNASamplePlayer samplePlayerWithError:onError isSpeakerOutput:[self isSpeakerOutput]];
   resolve(nil);
 }
 
@@ -253,6 +301,7 @@ RCT_EXPORT_METHOD(playSample:(double)playerId
     [RNAudioException UNKNOWN_PLAYER_ID:reject];
     return;
   }
+
   [player play:sampleName loop:loop resolve:resolve reject:reject];
 }
 

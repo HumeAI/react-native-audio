@@ -9,7 +9,8 @@
        loop:(BOOL)loop;
 
 - (void) play:(RCTPromiseResolveBlock)resolve
-       reject:(RCTPromiseRejectBlock)reject;
+       reject:(RCTPromiseRejectBlock)reject
+       isSpeakerOutput:(BOOL)isSpeakerOutput;
 
 - (void) stop;
 
@@ -17,8 +18,9 @@
 
 @implementation RNAOutputStream {
   AVAudioPlayerNode *player;
-  AVAudioMixerNode *mixer;
   NSTimer *timer;
+  RCTPromiseResolveBlock resolveBlock;
+  RCTPromiseRejectBlock rejectBlock;
 }
 
 - (id) init:(AVAudioEngine*)engine
@@ -26,57 +28,73 @@
        loop:(BOOL)loop
 {
   player = [[AVAudioPlayerNode alloc] init];
-  mixer = [[AVAudioMixerNode alloc] init];
   [engine attachNode:player];
-  [engine attachNode:mixer];
-  [engine connect:player to:mixer format:sample.format];
-  [engine connect:mixer to:engine.mainMixerNode format:nil];
+    
+  [engine connect:player to:engine.mainMixerNode format:sample.format];
+
   [player scheduleBuffer:sample
                   atTime:nil
                  options:loop ? AVAudioPlayerNodeBufferLoops : 0
   completionCallbackType:AVAudioPlayerNodeCompletionDataPlayedBack
        completionHandler:^(AVAudioPlayerNodeCompletionCallbackType) {
-    // NOTE: Node detachment should be done async, otherwise it just hangs,
-    // presumably because the engine waits till completion handler exists
-    // before it assumes the node can be detached.
+      if (self->resolveBlock) {
+        self->resolveBlock(nil);
+        self->resolveBlock = nil;
+      }
+      // NOTE: Node detachment should be done async, otherwise it just hangs,
+      // presumably because the engine waits till completion handler exists
+      // before it assumes the node can be detached.
     dispatch_async(dispatch_get_main_queue(), ^(void) {
-      [engine detachNode:self->mixer];
       [engine detachNode:self->player];
     });
   }];
+    
   return self;
-}
-
-- (void) fadeOut
-{
-  if (mixer.outputVolume <= 0.1) {
-    [player stop];
-    return;
-  }
-
-  mixer.outputVolume -= 0.1;
-  dispatch_time_t when = dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC * 0.01);
-  dispatch_after(when, dispatch_get_main_queue(), ^(void) {
-    [self fadeOut];
-  });
 }
 
 - (void) play:(RCTPromiseResolveBlock)resolve
        reject:(RCTPromiseRejectBlock)reject
+       isSpeakerOutput:(BOOL)isSpeakerOutput
 {
   NSError *error;
   AVAudioEngine *engine = player.engine;
+    
+  self->resolveBlock = resolve;
+  self->rejectBlock = reject;
+    
   if (engine.running != YES && [engine startAndReturnError:&error] != YES) {
     [[RNAudioException fromError:error] reject:reject];
     return;
   }
+    
   [player play];
-  resolve(nil);
+    
+    if (isSpeakerOutput) {
+        AVAudioSession *session = [AVAudioSession sharedInstance];
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:&error];
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error];
+        /*
+         The output audio port overrides are needed here for playback with echo cancellation to function properly.
+         Apple developer forum post here: https://forums.developer.apple.com/forums/thread/721535
+         No one seems to knows why and Apple doesn't seem to acknowledge that this is an issue.
+         */
+        
+        if (error) {
+            [[RNAudioException fromError:error] reject:reject];
+            return;
+        }
+    }
+    
 }
 
 - (void) stop
 {
-  if (mixer.outputVolume == 1.0) [self fadeOut];
+    [player stop];
+    if (self->resolveBlock) {
+        self->resolveBlock(nil);
+        self->resolveBlock = nil;
+    }
+    return;
 }
 
 @end // RNAOutputStream
@@ -86,18 +104,23 @@
   AVAudioEngine *engine;
   NSMutableDictionary<NSString*,AVAudioPCMBuffer*> *samples;
   RNAOutputStream *activeStream;
+  BOOL isSpeakerOutput;
 }
 
 /**
  * Inits RNASamplePlayer instance.
  */
 - (id) init:(OnError)onError
+       isSpeakerOutput:(BOOL)isSpeakerOutput;
 {
   self->onError = onError;
+  self->isSpeakerOutput = isSpeakerOutput;
   engine = [[AVAudioEngine alloc] init];
   samples = [NSMutableDictionary new];
   return self;
 }
+
+
 
 - (void) load:(NSString*)name
      fromPath:(NSString*)path
@@ -149,7 +172,7 @@
                   init:engine
                   sample:sample
                   loop:loop];
-  [activeStream play:resolve reject:reject];
+  [activeStream play:resolve reject:reject isSpeakerOutput:self->isSpeakerOutput];
 }
 
 - (void) stop:(NSString*)sampleName
@@ -176,12 +199,31 @@
   resolve(nil);
 }
 
+- (void) setIsSpeakerOutput:(BOOL)isSpeakerOutput
+{
+    if (self->isSpeakerOutput == isSpeakerOutput) return;
+    
+    self->isSpeakerOutput = isSpeakerOutput;
+    
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSError *error;
+    if (isSpeakerOutput) {
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error];
+    } else {
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:&error];
+    }
+    
+    if(error) {
+        self->onError(error.localizedDescription);
+    }
+}
+
+
 /**
  * Creates a new RNASamplePlayer instance.
  */
-+ (RNASamplePlayer*) new:(OnError)onError
-{
-  return [[RNASamplePlayer alloc] init:onError];
++ (RNASamplePlayer *)samplePlayerWithError:(OnError)onError isSpeakerOutput:(BOOL)isSpeakerOutput {
+    return [[RNASamplePlayer alloc] init:onError isSpeakerOutput:isSpeakerOutput];
 }
 
 @end // RNASamplePlayer

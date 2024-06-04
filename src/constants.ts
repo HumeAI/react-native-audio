@@ -3,7 +3,6 @@
 import ReactNativeAudio from './ReactNativeAudio';
 
 const {
-  AUDIO_FORMAT_PCM_8BIT,
   AUDIO_FORMAT_PCM_16BIT,
   AUDIO_FORMAT_PCM_FLOAT,
 
@@ -28,7 +27,6 @@ const {
 export { IS_MAC_CATALYST };
 
 export enum AUDIO_FORMATS {
-  PCM_8BIT = AUDIO_FORMAT_PCM_8BIT,
   PCM_16BIT = AUDIO_FORMAT_PCM_16BIT,
   PCM_FLOAT = AUDIO_FORMAT_PCM_FLOAT,
 }

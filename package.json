@@ -1,6 +1,6 @@
 {
   "name": "@humeai/react-native-audio",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "React Native: access to the audio input stream",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
@@ -146,7 +146,8 @@
     ]
   },
   "dependencies": {
-    "@dr.pogodin/js-utils": "^0.0.6"
+    "@dr.pogodin/js-utils": "^0.0.6",
+    "@types/node": "^20.12.7"
   },
   "codegenConfig": {
     "name": "RNReactNativeAudioSpec",
