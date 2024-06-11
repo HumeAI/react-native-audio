@@ -35,6 +35,8 @@ typedef void (^OnChunk)(int chunkId, unsigned char *chunk, int size);
 
 - (void)stop;
 
+- (void)reconfigureInputEngine;
+
 + (RNAInputAudioStream*) streamAudioSource:(enum AUDIO_SOURCES)audioSource
                                 sampleRate:(int)sampleRate
                              channelConfig:(enum CHANNEL_CONFIGS)channelConfig

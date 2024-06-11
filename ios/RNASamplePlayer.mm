@@ -72,7 +72,7 @@
     if (isSpeakerOutput) {
         AVAudioSession *session = [AVAudioSession sharedInstance];
         [session overrideOutputAudioPort:AVAudioSessionPortOverrideNone error:&error];
-        [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error];
+        [session overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:&error]; // Built-in speaker only
         /*
          The output audio port overrides are needed here for playback with echo cancellation to function properly.
          Apple developer forum post here: https://forums.developer.apple.com/forums/thread/721535
@@ -110,8 +110,8 @@
 /**
  * Inits RNASamplePlayer instance.
  */
-- (id) init:(OnError)onError
-       isSpeakerOutput:(BOOL)isSpeakerOutput;
+
+- (id) init:(OnError)onError isSpeakerOutput:(BOOL)isSpeakerOutput;
 {
   self->onError = onError;
   self->isSpeakerOutput = isSpeakerOutput;

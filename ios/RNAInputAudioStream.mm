@@ -9,6 +9,8 @@
   OnChunk onChunk;
   OnError onError;
   AVAudioEngine *audioEngine;
+  AVAudioFormat *desiredFormat;
+  int _samplingSize;
 }
 
 - (id)initWithAudioSource:(enum AUDIO_SOURCES)audioSource
@@ -19,103 +21,113 @@
                   onChunk:(OnChunk)onChunk
                   onError:(OnError)onError
 {
-  self = [super init];
+    self = [super init];
     if (self) {
-        
         self->onChunk = onChunk;
         self->onError = onError;
-        
+        self->_samplingSize = samplingSize;
 
-      audioEngine = [[AVAudioEngine alloc] init];
-      AVAudioInputNode *inputNode = [audioEngine inputNode];
+        if (![self setupAudioEngineWithSampleRate:sampleRate channelCount:(channelConfig == MONO ? 1 : 2) audioFormat:audioFormat]) {
+            return nil;
+        }
+    }
+    return self;
+}
+
+- (void)reconfigureInputEngine {
+    if (audioEngine.isRunning) {
+        [audioEngine.inputNode removeTapOnBus:0];
+        [audioEngine stop];
+    }
+
+    if (![self setupAudioEngineWithSampleRate:desiredFormat.sampleRate channelCount:desiredFormat.channelCount audioFormat:(desiredFormat.commonFormat == AVAudioPCMFormatInt16) ? PCM_16BIT : PCM_FLOAT]) {
+        return;
+    }
+}
+
+- (BOOL)setupAudioEngineWithSampleRate:(int)sampleRate
+                         channelCount:(int)channelCount
+                          audioFormat:(enum AUDIO_FORMATS)audioFormat
+{
+    audioEngine = [[AVAudioEngine alloc] init];
+    AVAudioInputNode *inputNode = [audioEngine inputNode];
     
-        
-        NSError *error = nil;
-        
-        if (@available(iOS 13.0, *)) { // Not sure if there's a better place for this, but it silences the warning in Xcode as is.
-            [inputNode setVoiceProcessingEnabled:YES error:&error];
-        } else {
-            onError(@"Unsupported iOS version! You must be on version >= 13.0");
-            return nil;
+    NSError *error = nil;
+    
+    if (@available(iOS 13.0, *)) {
+        // I'd like to not use voice processing when we don't need to, but there's no easy way to tell if sound will be played "out loud" or not.
+        [inputNode setVoiceProcessingEnabled:YES error:&error];
+        if (error) {
+            onError([NSString stringWithFormat:@"Voice processing error: %@", error]);
+            return NO;
         }
-        
-        AVAudioFormat *inputNodeFormat = [inputNode outputFormatForBus:0];
-        NSLog(@"Native input audio format: %@", inputNodeFormat);
-        
-        AVAudioCommonFormat commonFormat;
-        if (audioFormat == PCM_16BIT) {
-            commonFormat = AVAudioPCMFormatInt16;
-        } else {
-            // PCM_FLOAT
-            commonFormat = AVAudioPCMFormatFloat32;
-        }
-        
-        
-      AVAudioFormat *desiredFormat = [[AVAudioFormat alloc] initWithCommonFormat:commonFormat
-                                                               sampleRate:sampleRate
-                                                                 channels:(channelConfig == MONO ? 1 : 2)
-                                                              interleaved:NO];
-       NSLog(@"Desired input audio format: %@", desiredFormat);
-        
-        // This converter could be further configured, but the default settings are quite good imo
-        AVAudioConverter *audioConverter = [[AVAudioConverter alloc] initFromFormat:inputNodeFormat toFormat:desiredFormat];
-        if (audioConverter == nil) {
-            onError(@"Conversion to desired format is not possible! Please ensure your stream settings and device capabilities are aligned.");
-            return nil;
-        }
-        
-
-        float sampleRateCoefficient = inputNodeFormat.sampleRate / desiredFormat.sampleRate;
-        
-        // A desired frame of size @samplingSize at sample rate @sampleRate can be obtained as below.
-        // We have limited influence over the input format from the hardware, so we will defer our conversions to the AVAudioConverter
-        UInt32 convertedBufferSize = UInt32(samplingSize * sampleRateCoefficient);
-        
-        [inputNode installTapOnBus:0 bufferSize:convertedBufferSize format:inputNodeFormat block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
-            
-            buffer.frameLength = convertedBufferSize; // The bufferSize argument above is usually ignored. Setting the frameLength like this forces the correct sizing
-        
-            // Since we are taking the given samplingSize to be in terms of output format, we don't need to adjust frameCapacity on the converted buffer
-            AVAudioPCMBuffer *convertedBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:desiredFormat frameCapacity:(AVAudioFrameCount)samplingSize];
-            
-            AVAudioConverterInputBlock inputBlock = ^AVAudioBuffer * _Nullable(AVAudioPacketCount inNumPackets, AVAudioConverterInputStatus *outStatus) {
-                *outStatus = AVAudioConverterInputStatus_HaveData;
-                return buffer;
-            };
-            
-            NSError *conversionError = nil;
-            AVAudioConverterOutputStatus status = [audioConverter convertToBuffer:convertedBuffer error:&conversionError withInputFromBlock:inputBlock];
-            
-            if (status != AVAudioConverterOutputStatus_HaveData) {
-                onError([NSString stringWithFormat:@"Conversion error: %@", conversionError]);
-                return;
-            }
-
-            const AudioBufferList *bufferList = convertedBuffer.audioBufferList;
-
-            for (NSUInteger i = 0; i < bufferList->mNumberBuffers; i++) {
-                AudioBuffer audioBuffer = bufferList->mBuffers[i];
-                
-                if (!self.muted) {
-                    self->onChunk(self->chunkId, (unsigned char *) audioBuffer.mData,(unsigned int) audioBuffer.mDataByteSize);
-                }
-
-                // Increment chunkId for the next audio chunk.
-                ++self->chunkId;
-            }
-        }];
-        
-
-      [audioEngine prepare];
-      [audioEngine startAndReturnError:&error];
-      if (error) {
-          onError([NSString stringWithFormat:@"AVAudioEngine start error: %@", error]);
-          return nil;
-      }
-        
+    } else {
+        onError(@"Unsupported iOS version! You must be on version >= 13.0");
+        return NO;
     }
     
-  return self;
+    AVAudioFormat *inputFormat = [inputNode outputFormatForBus:0];
+    
+    AVAudioCommonFormat commonFormat = (audioFormat == PCM_16BIT) ? AVAudioPCMFormatInt16 : AVAudioPCMFormatFloat32;
+    desiredFormat = [[AVAudioFormat alloc] initWithCommonFormat:commonFormat sampleRate:sampleRate channels:channelCount interleaved:YES];
+    
+    
+    AVAudioConverter *audioConverter = [[AVAudioConverter alloc] initFromFormat:inputFormat toFormat:desiredFormat];
+    if (!audioConverter) {
+        onError(@"Conversion to desired format is not possible! Please ensure your stream settings and device capabilities are aligned.");
+        return NO;
+    }
+    
+    float sampleRateCoefficient = inputFormat.sampleRate / desiredFormat.sampleRate;
+    UInt32 convertedBufferSize = UInt32(_samplingSize * sampleRateCoefficient);
+    
+    [self installTapOnInputNode:inputNode bufferSize:convertedBufferSize inputFormat:inputFormat audioConverter:audioConverter];
+    
+    [audioEngine prepare];
+    [audioEngine startAndReturnError:&error];
+    if (error) {
+        onError([NSString stringWithFormat:@"AVAudioEngine start error: %@", error]);
+        return NO;
+    }
+    
+    return YES;
+}
+
+- (void)installTapOnInputNode:(AVAudioInputNode *)inputNode
+                   bufferSize:(UInt32)bufferSize
+                  inputFormat:(AVAudioFormat *)inputFormat
+               audioConverter:(AVAudioConverter *)audioConverter
+{
+    [inputNode installTapOnBus:0 bufferSize:bufferSize format:inputFormat block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
+        buffer.frameLength = bufferSize; // The bufferSize argument above is usually ignored. Setting the frameLength like this forces the correct sizing
+        
+        // Since we are taking the given samplingSize to be in terms of output format, we don't need to adjust frameCapacity on the converted buffer
+        AVAudioPCMBuffer *convertedBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:self->desiredFormat frameCapacity:(AVAudioFrameCount)self->_samplingSize];
+        
+        AVAudioConverterInputBlock inputBlock = ^AVAudioBuffer * _Nullable(AVAudioPacketCount inNumPackets, AVAudioConverterInputStatus *outStatus) {
+            *outStatus = AVAudioConverterInputStatus_HaveData;
+            return buffer;
+        };
+        
+        NSError *conversionError = nil;
+        AVAudioConverterOutputStatus status = [audioConverter convertToBuffer:convertedBuffer error:&conversionError withInputFromBlock:inputBlock];
+        
+        if (status != AVAudioConverterOutputStatus_HaveData) {
+            self->onError([NSString stringWithFormat:@"Conversion error: %@", conversionError]);
+            return;
+        }
+
+        const AudioBufferList *bufferList = convertedBuffer.audioBufferList;
+        for (NSUInteger i = 0; i < bufferList->mNumberBuffers; i++) {
+            AudioBuffer audioBuffer = bufferList->mBuffers[i];
+            NSData *_data = [NSData dataWithBytes:audioBuffer.mData length:audioBuffer.mDataByteSize];
+            
+            if (!self.muted) {
+                self->onChunk(self->chunkId, (unsigned char *)[_data bytes], (unsigned int)[_data length]);
+            }
+            ++self->chunkId;
+        }
+    }];
 }
 
 - (void)dealloc {
