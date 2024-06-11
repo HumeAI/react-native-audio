@@ -12,6 +12,7 @@ NSString *EVENT_SAMPLE_PLAYER_ERROR = @"RNA_SamplePlayerError";
 @implementation ReactNativeAudio {
   NSMutableDictionary<NSNumber*,RNAInputAudioStream*> *inputStreams;
   NSMutableDictionary<NSNumber*,RNASamplePlayer*> *samplePlayers;
+  NSMutableData *audioBuffer;
   
 }
 
@@ -20,6 +21,7 @@ RCT_EXPORT_MODULE()
 - (instancetype) init {
   inputStreams = [NSMutableDictionary new];
   samplePlayers = [NSMutableDictionary new];
+    audioBuffer = [NSMutableData new];
   return [super init];
 }
 
@@ -74,6 +76,37 @@ RCT_REMAP_METHOD(getInputAvailable,
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+- (void)handleAudioRouting {
+    NSError *error = nil;
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    
+    AudioSessionIO ioConfig = getBestFitAudioPorts(session, &error);
+    
+    if (error) {
+        [RNAudioException fromError:error];
+        return;
+    }
+    
+    BOOL speakerOutput = [ioConfig.output.portType isEqual:AVAudioSessionPortBuiltInSpeaker];
+    
+    for (id key in samplePlayers) {
+        RNASamplePlayer *player = [samplePlayers objectForKey:key];
+        [player setIsSpeakerOutput:speakerOutput];
+    }
+    
+    [session setPreferredInput:ioConfig.input error:&error];
+    
+    if (error) {
+        [RNAudioException fromError:error];
+        return;
+    }
+    
+    for (id key in inputStreams) {
+        RNAInputAudioStream *stream = [inputStreams objectForKey:key];
+        [stream reconfigureInputEngine];
+    }
+}
+
 - (void)handleRouteChange:(NSNotification *)notification {
     AVAudioSessionRouteChangeReason reason = (AVAudioSessionRouteChangeReason)[notification.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
 
@@ -82,32 +115,74 @@ RCT_REMAP_METHOD(getInputAvailable,
         case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
         case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
         case AVAudioSessionRouteChangeReasonCategoryChange:
-        case AVAudioSessionRouteChangeReasonOverride:
         case AVAudioSessionRouteChangeReasonWakeFromSleep:
-        case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
         case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
-            
-            for (id key in samplePlayers) {
-                RNASamplePlayer *player = [samplePlayers objectForKey:key];
-                [player setIsSpeakerOutput:[self isSpeakerOutput]];
-            }
-            
+            [self handleAudioRouting];
             break;
+        case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
+        case AVAudioSessionRouteChangeReasonOverride:
+            break;
+            
     }
 }
 
-- (BOOL) isSpeakerOutput {
-    AVAudioSession *session = [AVAudioSession sharedInstance];
-    NSArray<AVAudioSessionPortDescription *> *outputs = session.currentRoute.outputs;
+typedef struct {
+    AVAudioSessionPortDescription *input;
+    AVAudioSessionPortDescription *output;
+} AudioSessionIO;
+
+/// Get the best fit audio ports based on the available I/O in the session. Always prefer I/O routes and fall back to built-ins (assuming that if the user has a device connected they want to use it)
+AudioSessionIO getBestFitAudioPorts(AVAudioSession *session, NSError **error) {
     
-    // currentRoute.outputs is an array but I haven't seen it report more than 1 output in any setup I have tested
-    for (AVAudioSessionPortDescription *output in outputs) {
-        if ([[output.portType lowercaseString] containsString:@"speaker"]) {
-            return YES;
+    AudioSessionIO io = { nil, nil };
+    
+    // Observe current output route to determine best configuration. We can not programmatically change/access the full list of available outputs
+    // as we can inputs outside of an MPVolumeView component.
+    NSArray<AVAudioSessionPortDescription *> *outputs = [session currentRoute].outputs;
+    NSArray<AVAudioSessionPortDescription *> *inputs = [session availableInputs];
+    
+    if (inputs.count == 0 || outputs.count == 0) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"com.hume.rnaudio" code:100 userInfo:@{ NSLocalizedDescriptionKey: @"No available input or output devices in current session." }];
+        }
+        return io;
+    }
+    
+    if (outputs.count > 1) { // I am not 100% confident this is correct, but I _think_ we can only have multiple output routes with AVAudioSessionCategoryMultiRoute
+        if (error) {
+            *error = [NSError errorWithDomain:@"com.hume.rnaudio" code:100 userInfo:@{ NSLocalizedDescriptionKey: @"Multiple output routes in current session"}];
+        }
+        return io;
+    }
+    
+    io.output = outputs.firstObject;
+    
+    AVAudioSessionPort outputPortType = outputs.firstObject.portType;
+    
+    // Check for a matching input port type. This would imply an I/O port (https://developer.apple.com/documentation/avfaudio/avaudiosessionport#3591390)
+    // These ports provide input and output so we'd want them to match. (Bluetooth, CarPlay, etc.)
+    for (AVAudioSessionPortDescription *port in inputs) {
+        if ([port.portType isEqual:outputPortType]) {
+            io.input = port;
+            return io;
         }
     }
-    return NO;
+    
+    // No matching I/O port so check inputs again for any non built-in type. This would imply a wired microphone or other line-in device
+    for (AVAudioSessionPortDescription *port in inputs) {
+        if (![port.portType isEqual:AVAudioSessionPortBuiltInMic]) {
+            io.input = port;
+            return io;
+        }
+    }
+    
+    // By process of elimination we know that the input is the built-in mic and the only input, so grab the first port in the list
+    io.input = inputs.firstObject;
+    
+    return io;
 }
+
+
 
 // TODO: Should we somehow plug-in this audio system configuration into
 // AudioStream initialization, and base it on the "audioSource" parameter,
@@ -167,6 +242,8 @@ RCT_REMAP_METHOD(configAudioSystem,
   resolve(nil);
 }
 
+
+
 // NOTE: Can't use enum as the argument type here, as RN won't understand that.
 RCT_REMAP_METHOD(listen,
   listen:(double)streamId
@@ -181,10 +258,27 @@ RCT_REMAP_METHOD(listen,
   NSNumber *sid = [NSNumber numberWithDouble:streamId];
   [self registerAVAudioSessionObservers];
     
+/// audioBuffer code is for saving tapped bytes in the device document directory for de-bugging. It was cumbersome finding this code again any time I wanted to check the taps
+/// Woth noting that this only fires when the stream is not muted, resulting in sped-up and choppy audio if the device is struggling to keep up with the RN bridge
+//   [audioBuffer setLength:0];
+    
+//    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+//    NSString *documentsDirectory = [paths firstObject];
+//
+//    NSFileManager *fileManager = [NSFileManager defaultManager];
+//    NSArray *documentFiles = [fileManager contentsOfDirectoryAtPath:documentsDirectory error:nil];
+//    for (NSString *file in documentFiles) {
+//      NSString *filePath = [documentsDirectory stringByAppendingPathComponent:file];
+//      [fileManager removeItemAtPath:filePath error:nil];
+//        RCTLogInfo(@"Removed file at path %@",filePath);
+//    }
+    
   OnChunk onChunk = ^void(int chunkId, unsigned char *chunk, int size) {
     NSData* data = [NSData dataWithBytesNoCopy:chunk
                                         length:size
                                   freeWhenDone:NO];
+      
+//  [audioBuffer appendBytes:chunk length:size];
       
     [self sendEventWithName:EVENT_AUDIO_CHUNK
                        body:@{@"streamId":sid,
@@ -217,14 +311,65 @@ RCT_REMAP_METHOD(unlisten,
   reject:(RCTPromiseRejectBlock) reject
 ) {
     NSNumber *id = [NSNumber numberWithDouble:streamId];
+/// Second part of saving tapped audio
+//    NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+//    NSString *documentsDirectory = [paths firstObject];
+//
+//    NSString *wavFilePath = [documentsDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"audio_%@.wav", id]];
+//
+//    [self saveWAVFile:audioBuffer sampleRate:44100 numChannels:1 bitsPerSample:16 toPath:wavFilePath]; // 44.1k mono PCM16
+//
+//    [audioBuffer setLength:0];
     
-      [inputStreams[id] stop];
-      [inputStreams removeObjectForKey:id];
-      [self unregisterAVAudioSessionObservers];
+    [inputStreams[id] stop];
+    [inputStreams removeObjectForKey:id];
+    [self unregisterAVAudioSessionObservers];
       
-      RCTLogInfo(@"[Stream %@] Is unlistened", id);
+    RCTLogInfo(@"[Stream %@] Is unlistened", id);
       
-      resolve(nil);
+    resolve(nil);
+}
+
+typedef struct {
+    char chunkID[4];       // "RIFF"
+    int chunkSize;         // Size of the entire file in bytes minus 8 bytes for the two fields not included in this count: chunkID and chunkSize.
+    char format[4];        // "WAVE"
+    char subchunk1ID[4];   // "fmt "
+    int subchunk1Size;     // 16 for PCM. This is the size of the rest of the Subchunk which follows this number.
+    short audioFormat;     // PCM = 1 (i.e. Linear quantization). Values other than 1 indicate some form of compression.
+    short numChannels;     // Number of channels. Mono = 1, Stereo = 2, etc.
+    int sampleRate;        // Sample rate (e.g., 44100, 48000, etc.)
+    int byteRate;          // SampleRate * NumChannels * BitsPerSample/8
+    short blockAlign;      // NumChannels * BitsPerSample/8
+    short bitsPerSample;   // Number of bits per sample (usually 16 or 24)
+    char subchunk2ID[4];   // "data"
+    int subchunk2Size;     // NumSamples * NumChannels * BitsPerSample/8
+} WAVHeader;
+
+// This and above struct used for saving tapped audio
+- (void)saveWAVFile:(NSData *)pcmData sampleRate:(int)sampleRate numChannels:(int)numChannels bitsPerSample:(int)bitsPerSample toPath:(NSString *)filePath {
+    WAVHeader header;
+    int pcmDataSize = (int)[pcmData length];
+
+    memcpy(header.chunkID, "RIFF", 4);
+    header.chunkSize = 36 + pcmDataSize;
+    memcpy(header.format, "WAVE", 4);
+    memcpy(header.subchunk1ID, "fmt ", 4);
+    header.subchunk1Size = 16;
+    header.audioFormat = 1; // PCM
+    header.numChannels = numChannels;
+    header.sampleRate = sampleRate;
+    header.byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    header.blockAlign = numChannels * bitsPerSample / 8;
+    header.bitsPerSample = bitsPerSample;
+    memcpy(header.subchunk2ID, "data", 4);
+    header.subchunk2Size = pcmDataSize;
+
+    NSMutableData *wavData = [NSMutableData dataWithBytes:&header length:sizeof(WAVHeader)];
+    [wavData appendData:pcmData];
+    [wavData writeToFile:filePath atomically:YES];
+
+    RCTLogInfo(@"WAV file saved at: %@", filePath);
 }
 
 
@@ -269,8 +414,21 @@ RCT_EXPORT_METHOD(initSamplePlayer:(double)playerId
     [self sendEventWithName:EVENT_SAMPLE_PLAYER_ERROR
                        body:@{@"playerId":id, @"error":error}];
   };
+    
+  NSError *error = nil;
+  AVAudioSession *session = [AVAudioSession sharedInstance];
+    
+  AudioSessionIO ioConfig = getBestFitAudioPorts(session, &error);
+    
+  if (error) {
+      [RNAudioException fromError:error];
+      return;
+  }
+    
+  BOOL speakerOutput = [ioConfig.output.portType isEqual:AVAudioSessionPortBuiltInSpeaker];
 
-  samplePlayers[id] = [RNASamplePlayer samplePlayerWithError:onError isSpeakerOutput:[self isSpeakerOutput]];
+  samplePlayers[id] = [RNASamplePlayer samplePlayerWithError:onError isSpeakerOutput:speakerOutput];
+  [self handleAudioRouting];
   resolve(nil);
 }
 
