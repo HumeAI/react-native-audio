@@ -1,6 +1,6 @@
 {
   "name": "@humeai/react-native-audio",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "React Native: access to the audio input stream",
   "main": "lib/commonjs/index",
   "module": "lib/module/index",
