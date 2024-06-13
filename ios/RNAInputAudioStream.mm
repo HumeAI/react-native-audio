@@ -98,6 +98,11 @@
                   inputFormat:(AVAudioFormat *)inputFormat
                audioConverter:(AVAudioConverter *)audioConverter
 {
+    if (bufferSize < 128 || inputFormat.sampleRate < 8000) { // 128 samples and 8000 Hz used as a generous minimum. In practice this would probably be too low, but we control this value upstream
+        self->onError(@"Invalid input format from node (< 8000 Hz) or buffer size too small (< 128)");
+        return;
+    }
+    
     [inputNode installTapOnBus:0 bufferSize:bufferSize format:inputFormat block:^(AVAudioPCMBuffer *buffer, AVAudioTime *when) {
         buffer.frameLength = bufferSize; // The bufferSize argument above is usually ignored. Setting the frameLength like this forces the correct sizing
         

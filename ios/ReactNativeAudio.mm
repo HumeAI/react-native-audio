@@ -70,6 +70,7 @@ RCT_REMAP_METHOD(getInputAvailable,
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
 
     [center addObserver:self selector:@selector(handleRouteChange:) name:AVAudioSessionRouteChangeNotification object:nil];
+    [center addObserver:self selector:@selector(handleAudioInterruption:) name:AVAudioSessionInterruptionNotification object:nil];
 }
 
 - (void)unregisterAVAudioSessionObservers {
@@ -110,7 +111,7 @@ RCT_REMAP_METHOD(getInputAvailable,
 - (void)handleRouteChange:(NSNotification *)notification {
     AVAudioSessionRouteChangeReason reason = (AVAudioSessionRouteChangeReason)[notification.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
 
-    switch (reason) { 
+    switch (reason) {
         case AVAudioSessionRouteChangeReasonUnknown:
         case AVAudioSessionRouteChangeReasonNewDeviceAvailable:
         case AVAudioSessionRouteChangeReasonOldDeviceUnavailable:
@@ -122,9 +123,27 @@ RCT_REMAP_METHOD(getInputAvailable,
         case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
         case AVAudioSessionRouteChangeReasonOverride:
             break;
-            
     }
 }
+
+- (void)handleAudioInterruption:(NSNotification *)notification {
+    NSDictionary *userInfo = notification.userInfo;
+    AVAudioSessionInterruptionType interruptionType = (AVAudioSessionInterruptionType)[userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue];
+    
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    
+    switch (interruptionType) {
+        case AVAudioSessionInterruptionTypeBegan:
+            [session setActive:NO error:nil];
+            break;
+        case AVAudioSessionInterruptionTypeEnded: {
+            [self configureAudioSessionWithError:nil];
+            break;
+        }
+    }
+}
+
+
 
 typedef struct {
     AVAudioSessionPortDescription *input;
@@ -182,6 +201,47 @@ AudioSessionIO getBestFitAudioPorts(AVAudioSession *session, NSError **error) {
     return io;
 }
 
+- (void)configureAudioSessionWithError:(NSError **)error {
+  RCTLogInfo(@"Audio session configuration...");
+    
+  AVAudioSession *audioSession = AVAudioSession.sharedInstance;
+  NSArray<AVAudioSessionCategory> *cats = audioSession.availableCategories;
+
+  AVAudioSessionCategory category;
+  if ([cats containsObject:AVAudioSessionCategoryPlayAndRecord]) {
+    category = AVAudioSessionCategoryPlayAndRecord;
+  } else {
+    if (error) {
+      *error = [NSError errorWithDomain:@"incompatible_audio_session"
+                                   code:1001
+                               userInfo:@{NSLocalizedDescriptionKey: @"neither play-and-record, nor playback category is supported"}];
+    }
+    return;
+  }
+
+  AVAudioSessionCategoryOptions options =
+    AVAudioSessionCategoryOptionAllowBluetooth |
+    AVAudioSessionCategoryOptionAllowBluetoothA2DP |
+    AVAudioSessionCategoryOptionDefaultToSpeaker;
+
+  if (@available(iOS 14.5, *)) {
+    options |= AVAudioSessionCategoryOptionOverrideMutedMicrophoneInterruption;
+  }
+
+  // In below function calls, error pointer is populated for us
+  BOOL res = [audioSession setCategory:category
+                           withOptions:options
+                                 error:error];
+  if (!res) {
+    return;
+  }
+
+  res = [audioSession setActive:YES error:error];
+  if (!res) {
+    return;
+  }
+}
+
 
 
 // TODO: Should we somehow plug-in this audio system configuration into
@@ -191,50 +251,12 @@ RCT_REMAP_METHOD(configAudioSystem,
   configAudioSystem:(RCTPromiseResolveBlock)resolve
   reject:(RCTPromiseRejectBlock)reject
 ) {
-  RCTLogInfo(@"Audio session configuration...");
 
-  AVAudioSession *audioSession = AVAudioSession.sharedInstance;
-  NSArray<AVAudioSessionCategory> *cats = audioSession.availableCategories;
-
-  AVAudioSessionCategory category;
-  if ([cats containsObject:AVAudioSessionCategoryPlayAndRecord]) {
-    category = AVAudioSessionCategoryPlayAndRecord;
-  } else {
-    reject(@"incompatible_audio_session",
-           @"neither play-and-record, nor playback category is supported",
-           nil);
-    return;
-  }
-
+    NSLog(@"INITIAL CONFIG");
   NSError *error = nil;
+  [self configureAudioSessionWithError:&error];
 
-  AVAudioSessionCategoryOptions options =
-    AVAudioSessionCategoryOptionAllowBluetooth |
-    AVAudioSessionCategoryOptionAllowBluetoothA2DP |
-    AVAudioSessionCategoryOptionDefaultToSpeaker;
-
-  // NOTE: The AVAudioSessionCategoryOptionOverrideMutedMicrophoneInterruption
-  // option triggers an error if one attempts to set it for a category that does
-  // not support audio input. For categories that do support it, it allows for
-  // simultaneous playback and audio input.
-  if (@available(iOS 14.5, *)) {
-    options |= AVAudioSessionCategoryOptionOverrideMutedMicrophoneInterruption;
-  }
-
-  BOOL res = [audioSession setCategory:category
-                           withOptions:options
-                                 error:&error];
-
-
-  // TODO: Probably, need to provide additional details here. At least
-  // add some error ID, to determine where exactly do errors are thrown.
-  if (res != YES || error != nil) {
-    reject(error.domain, error.localizedDescription, error);
-    return;
-  }
-
-  res = [audioSession setActive:YES error:&error];
-  if (res != YES || error != nil) {
+  if (error) {
     reject(error.domain, error.localizedDescription, error);
     return;
   }
@@ -301,6 +323,7 @@ RCT_REMAP_METHOD(listen,
                                  onError:onError];
   
   inputStreams[sid] = stream;
+  [self handleAudioRouting]; // This has more to do with input configuration than output
   
   resolve(nil);
 }
@@ -421,14 +444,13 @@ RCT_EXPORT_METHOD(initSamplePlayer:(double)playerId
   AudioSessionIO ioConfig = getBestFitAudioPorts(session, &error);
     
   if (error) {
-      [RNAudioException fromError:error];
+      [[RNAudioException fromError:error] reject:reject];
       return;
   }
     
   BOOL speakerOutput = [ioConfig.output.portType isEqual:AVAudioSessionPortBuiltInSpeaker];
 
   samplePlayers[id] = [RNASamplePlayer samplePlayerWithError:onError isSpeakerOutput:speakerOutput];
-  [self handleAudioRouting];
   resolve(nil);
 }
 
