@@ -71,7 +71,6 @@
     AVAudioCommonFormat commonFormat = (audioFormat == PCM_16BIT) ? AVAudioPCMFormatInt16 : AVAudioPCMFormatFloat32;
     desiredFormat = [[AVAudioFormat alloc] initWithCommonFormat:commonFormat sampleRate:sampleRate channels:channelCount interleaved:YES];
     
-    
     AVAudioConverter *audioConverter = [[AVAudioConverter alloc] initFromFormat:inputFormat toFormat:desiredFormat];
     if (!audioConverter) {
         onError(@"Conversion to desired format is not possible! Please ensure your stream settings and device capabilities are aligned.");
