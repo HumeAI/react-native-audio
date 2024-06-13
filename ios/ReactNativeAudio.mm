@@ -102,7 +102,8 @@ RCT_REMAP_METHOD(getInputAvailable,
         return;
     }
     
-    for (id key in inputStreams) {
+    if ([inputStreams count] == 1) {
+        id key = [[inputStreams allKeys] firstObject];
         RNAInputAudioStream *stream = [inputStreams objectForKey:key];
         [stream reconfigureInputEngine];
     }
@@ -118,7 +119,9 @@ RCT_REMAP_METHOD(getInputAvailable,
         case AVAudioSessionRouteChangeReasonCategoryChange:
         case AVAudioSessionRouteChangeReasonWakeFromSleep:
         case AVAudioSessionRouteChangeReasonRouteConfigurationChange:
-            [self handleAudioRouting];
+            @synchronized (self) {
+                [self handleAudioRouting];
+            }
             break;
         case AVAudioSessionRouteChangeReasonNoSuitableRouteForCategory:
         case AVAudioSessionRouteChangeReasonOverride:
@@ -323,8 +326,6 @@ RCT_REMAP_METHOD(listen,
                                  onError:onError];
   
   inputStreams[sid] = stream;
-  [self handleAudioRouting]; // This has more to do with input configuration than output
-  
   resolve(nil);
 }
 
